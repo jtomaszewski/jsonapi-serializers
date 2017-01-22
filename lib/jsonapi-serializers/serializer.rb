@@ -112,7 +112,7 @@ module JSONAPI
             data[formatted_attribute_name]['links']['related'] = links_related if links_related
           end
 
-          if @_include_linkages.include?(formatted_attribute_name) || attr_data[:options][:include_data]
+          if @_include_linkages.include?('*') || @_include_linkages.include?(formatted_attribute_name) || attr_data[:options][:include_data]
             object = has_one_relationship(attribute_name, attr_data)
             if object.nil?
               # Spec: Resource linkage MUST be represented as one of the following:
@@ -147,7 +147,7 @@ module JSONAPI
           # - an empty array ([]) for empty to-many relationships.
           # - an array of linkage objects for non-empty to-many relationships.
           # http://jsonapi.org/format/#document-structure-resource-relationships
-          if @_include_linkages.include?(formatted_attribute_name) || attr_data[:options][:include_data]
+          if @_include_linkages.include?('*') || @_include_linkages.include?(formatted_attribute_name) || attr_data[:options][:include_data]
             data[formatted_attribute_name]['data'] = []
             objects = has_many_relationship(attribute_name, attr_data) || []
             objects.each do |obj|
@@ -334,7 +334,7 @@ module JSONAPI
       # If 'include' relationships are given, recursively find and include each object.
       if includes
         relationship_data = {}
-        inclusion_tree = parse_relationship_paths(includes)
+        inclusion_tree = includes.include?('*') ? true : parse_relationship_paths(includes)
 
         # Given all the primary objects (either the single root object or collection of objects),
         # recursively search and find related associations that were specified as includes.
@@ -440,11 +440,19 @@ module JSONAPI
     #   ['users', '2'] => {object: <User>, include_linkages: []},
     # }
     def self.find_recursive_relationships(root_object, root_inclusion_tree, results, options)
+      serializer = JSONAPI::Serializer.find_serializer(root_object, options)
+
+      if root_inclusion_tree == true
+        # Include all
+        root_inclusion_tree = (serializer.has_one_relationships.keys + serializer.has_many_relationships.keys)
+          .map { |key| [key.to_s, true] }
+          .to_h
+      end
+
       root_inclusion_tree.each do |attribute_name, child_inclusion_tree|
         # Skip the sentinal value, but we need to preserve it for siblings.
         next if attribute_name == :_include
 
-        serializer = JSONAPI::Serializer.find_serializer(root_object, options)
         unformatted_attr_name = serializer.unformat_name(attribute_name).to_sym
 
         # We know the name of this relationship, but we don't know where it is stored internally.
@@ -482,7 +490,7 @@ module JSONAPI
         # Full linkage: a request for comments.author MUST automatically include comments
         # in the response.
         objects = is_collection ? object : [object]
-        if child_inclusion_tree[:_include] == true
+        if child_inclusion_tree == true || child_inclusion_tree[:_include] == true
           # Include the current level objects if the _include attribute exists.
           # If it is not set, that indicates that this is an inner path and not a leaf and will
           # be followed by the recursion below.
@@ -501,24 +509,28 @@ module JSONAPI
             # Spec: Resource linkage in a compound document allows a client to link together
             # all of the included resource objects without having to GET any relationship URLs.
             # http://jsonapi.org/format/#document-structure-resource-relationships
-            current_child_includes = []
-            inclusion_names = child_inclusion_tree.keys.reject { |k| k == :_include }
-            inclusion_names.each do |inclusion_name|
-              if child_inclusion_tree[inclusion_name][:_include]
-                current_child_includes << inclusion_name
+            current_child_includes = if child_inclusion_tree == true
+              '*'
+            else
+              attributes = []
+              inclusion_names = child_inclusion_tree.keys.reject { |k| k == :_include }
+              inclusion_names.each do |inclusion_name|
+                if child_inclusion_tree[inclusion_name][:_include]
+                  attributes << inclusion_name
+                end
               end
-            end
 
-            # Special merge: we might see this object multiple times in the course of recursion,
-            # so merge the include_linkages each time we see it to load all the relevant linkages.
-            current_child_includes += results[key] && results[key][:include_linkages] || []
-            current_child_includes.uniq!
+              # Special merge: we might see this object multiple times in the course of recursion,
+              # so merge the include_linkages each time we see it to load all the relevant linkages.
+              attributes += results[key] && results[key][:include_linkages] || []
+              attributes.uniq
+            end
             results[key] = {object: obj, include_linkages: current_child_includes}
           end
         end
 
         # Recurse deeper!
-        if !child_inclusion_tree.empty?
+        if child_inclusion_tree == true || !child_inclusion_tree.empty?
           # For each object we just loaded, find all deeper recursive relationships.
           objects.each do |obj|
             find_recursive_relationships(obj, child_inclusion_tree, results, options)
